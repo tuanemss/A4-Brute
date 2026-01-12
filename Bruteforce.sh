@@ -275,7 +275,7 @@ device_enter_mode() {
             
             device_enter_mode DFU
             
-            
+           
             local tool
             if [[ $device_proc == 4 ]]; then
                 tool="primepwn"
@@ -346,7 +346,11 @@ ipsw_get_url() {
 
 select_ramdisk_version() {
     echo
-    if [[ $device_proc == 4 ]]; then
+    if [[ $device_type == "iPad1,1" ]]; then
+        # iPad 1: use iOS 5.1.1
+        print "* Using iOS 5.1.1 (9B206) for iPad 1"
+        device_target_build="9B206"
+    elif [[ $device_proc == 4 ]]; then
         print "* Using iOS 6.1.3 (10B329) for A4 device"
         device_target_build="10B329"
     else
@@ -434,34 +438,40 @@ device_ramdisk() {
     
     "$dir/xpwntool" Ramdisk.raw Ramdisk.dmg -t RestoreRamdisk.dec
 
-    
+    # Patch iBSS
     log "Patching iBSS..."
     "$dir/xpwntool" iBSS.dec iBSS.raw
     "$dir/iBoot32Patcher" iBSS.raw iBSS.patched --rsa --debug
     "$dir/xpwntool" iBSS.patched iBSS -t iBSS.dec
 
-   
+    # Patch iBEC
     log "Patching iBEC..."
     "$dir/xpwntool" iBEC.dec iBEC.raw
     "$dir/iBoot32Patcher" iBEC.raw iBEC.patched --rsa --debug -b "rd=md0 -v amfi=0xff cs_enforcement_disable=1"
     "$dir/xpwntool" iBEC.patched iBEC -t iBEC.dec
 
-    
-    log "Patching Kernelcache..."
-    cp Kernelcache.dec Kernelcache.dec.bak
-    "$dir/xpwntool" Kernelcache.dec Kernelcache.raw
-    if [[ -s ../resources/kernel_patch.py ]]; then
-        python3 ../resources/kernel_patch.py Kernelcache.raw
-        if [[ -s Kernelcache.patched ]]; then
-            "$dir/xpwntool" Kernelcache.patched Kernelcache.dec -t Kernelcache.dec.bak
-            log "Kernel patched successfully."
+    #ipad 1 kernel patch disable 
+    if [[ $device_type == "iPad1,1" ]]; then
+        log "iPad 1 detected - skipping kernel patch."
+        mv Kernelcache.dec Kernelcache.dec.bak
+        cp Kernelcache.dec.bak Kernelcache.dec
+    else
+        log "Patching Kernelcache..."
+        cp Kernelcache.dec Kernelcache.dec.bak
+        "$dir/xpwntool" Kernelcache.dec Kernelcache.raw
+        if [[ -s ../resources/kernel_patch.py ]]; then
+            python3 ../resources/kernel_patch.py Kernelcache.raw
+            if [[ -s Kernelcache.patched ]]; then
+                "$dir/xpwntool" Kernelcache.patched Kernelcache.dec -t Kernelcache.dec.bak
+                log "Kernel patched successfully."
+            else
+                warn "Kernel patch script did not produce output, using unpatched kernel."
+                mv Kernelcache.dec.bak Kernelcache.dec
+            fi
         else
-            warn "Kernel patch script did not produce output, using unpatched kernel."
+            warn "kernel_patch.py not found, skipping kernel patch."
             mv Kernelcache.dec.bak Kernelcache.dec
         fi
-    else
-        warn "kernel_patch.py not found, skipping kernel patch."
-        mv Kernelcache.dec.bak Kernelcache.dec
     fi
 
     mv iBSS iBEC DeviceTree.dec Kernelcache.dec Ramdisk.dmg $ramdisk_path 2>/dev/null
@@ -472,7 +482,7 @@ device_ramdisk() {
 patch_ibss() {
     local build_id="${device_target_build:-12H321}"
     
-   
+    # A5 fallback for older versions
     case $build_id in
         [56789]* )
             case $device_type in
@@ -532,7 +542,7 @@ ipwndfu_send_ibss() {
         error "Cannot send iBSS without python2/ipwndfu."
     fi
     
-    
+    # Setup ipwndfu
     mkdir -p ../resources/ipwndfu
     if [[ ! -s ../resources/ipwndfu/ipwndfu ]]; then
         log "Downloading ipwndfu..."
@@ -542,7 +552,7 @@ ipwndfu_send_ibss() {
         mv ../resources/ipwndfu-* ../resources/ipwndfu
     fi
     
-   
+    # Setup libusb symlink for macOS
     if [[ $platform == "macos" ]]; then
         [[ -e /opt/local/lib/libusb-1.0.dylib ]] && ln -sf /opt/local/lib "$HOME/lib"
         [[ -e /opt/homebrew/lib/libusb-1.0.dylib ]] && ln -sf /opt/homebrew/lib "$HOME/lib"
@@ -566,7 +576,7 @@ ipwndfu_send_ibss() {
         
         log "Waiting for device to reconnect..."
         sleep 3
-       
+        
         $irecovery -q >/dev/null 2>&1 || {
             log "Waiting for DFU mode..."
             device_find_mode DFU 10
