@@ -191,7 +191,9 @@ device_get_info() {
     
     case $device_type in
         iPhone3,[123] | iPod4,1 ) device_proc=4;;
-        *) error "Device not supported: $device_type. Only A4 devices (iPhone 4, iPod touch 4) are supported.";;
+        iPad2,* | iPad3,[123] | iPhone4,1 | iPod5,1 ) device_proc=5;;
+        iPad3,[456] | iPhone5,* ) device_proc=6;;
+        *) error "Device not supported: $device_type";;
     esac
     all_flash="Firmware/all_flash/all_flash.${device_model}ap.production"
     device_fw_dir="../saved/firmware/$device_type"
@@ -247,13 +249,43 @@ device_enter_mode() {
         ;;
         "pwnDFU" )
             [[ $device_mode == "DFU" ]] && device_pwnd="$($irecovery -q | grep "PWND" | cut -c 7-)"
+            
+            
+            if [[ $device_proc == 5 ]]; then
+                    log "Already in pwned DFU: $device_pwnd"
+                else
+                    [[ $device_mode != "DFU" ]] && device_enter_mode DFU
+                    echo
+                    print "* A5(X) device detected - checkm8-a5 required"
+                    print "* You need Raspberry Pi Pico or Arduino+USB Host Shield"
+                    print "* Details: https://github.com/LukeZGD/checkm8-a5"
+                    echo
+                    log "Pwn device with checkm8-a5, then plug it back and press Enter."
+                    pause
+                    device_pwnd="$($irecovery -q | grep "PWND" | cut -c 7-)"
+                    [[ -z $device_pwnd ]] && error "Device NOT in pwned DFU mode."
+                    log "Found device in pwned DFU: $device_pwnd"
+                fi
+                return
+            fi
+            
+            
             [[ -n $device_pwnd ]] && { log "Already in pwned DFU: $device_pwnd"; return; }
             
             device_enter_mode DFU
             
-            # A4: use primepwn (or reipwnder on arm64 Mac)
-            local tool="primepwn"
-            [[ $platform == "macos" && $platform_arch == "arm64" ]] && tool="reipwnder"
+            
+            local tool
+            if [[ $device_proc == 4 ]]; then
+                tool="primepwn"
+                [[ $platform == "macos" && $platform_arch == "arm64" ]] && tool="reipwnder"
+            elif [[ $device_proc == 6 ]]; then
+                tool="ipwnder"
+                if [[ $platform == "macos" ]]; then
+                    tool="ipwnder32"
+                    [[ $platform_arch == "arm64" ]] && tool="ipwnder_lite"
+                fi
+            fi
             
             log "Placing device in pwnDFU using $tool"
             case $tool in
@@ -263,6 +295,9 @@ device_enter_mode() {
                     cp ../resources/limera1n-shellcode.bin shellcode/
                     ../bin/macos/reipwnder -p
                 ;;
+                "ipwnder" ) $ipwnder -p;;
+                "ipwnder32" ) "$dir/ipwnder32" -p --noibss;;
+                "ipwnder_lite" ) $ipwnder -d;;
             esac
             sleep 1
             device_pwnd="$($irecovery -q | grep "PWND" | cut -c 7-)"
@@ -310,9 +345,19 @@ ipsw_get_url() {
 
 select_ramdisk_version() {
     echo
-    # A4 only: use iOS 6.1.3
-    print "* Using iOS 6.1.3 (10B329) for A4 device"
-    device_target_build="10B329"
+    if [[ $device_proc == 4 ]]; then
+        print "* Using iOS 6.1.3 (10B329) for A4 device"
+        device_target_build="10B329"
+    else
+        print "* A5/A6 device - select iOS version:"
+        print "  1. iOS 6.1.3 (10B329)"
+        print "  2. iOS 9.0.2 (13A452) [default]"
+        read -p "$(input 'Enter choice [1/2]: ')" ver_choice
+        case "${ver_choice:-2}" in
+            1) device_target_build="10B329";;
+            *) device_target_build="13A452";;
+        esac
+    fi
     log "Using build: $device_target_build"
 }
 
@@ -388,19 +433,19 @@ device_ramdisk() {
     
     "$dir/xpwntool" Ramdisk.raw Ramdisk.dmg -t RestoreRamdisk.dec
 
-    # Patch iBSS
+    
     log "Patching iBSS..."
     "$dir/xpwntool" iBSS.dec iBSS.raw
     "$dir/iBoot32Patcher" iBSS.raw iBSS.patched --rsa --debug
     "$dir/xpwntool" iBSS.patched iBSS -t iBSS.dec
 
-    # Patch iBEC
+   
     log "Patching iBEC..."
     "$dir/xpwntool" iBEC.dec iBEC.raw
     "$dir/iBoot32Patcher" iBEC.raw iBEC.patched --rsa --debug -b "rd=md0 -v amfi=0xff cs_enforcement_disable=1"
     "$dir/xpwntool" iBEC.patched iBEC -t iBEC.dec
 
-    # Patch Kernelcache (AMFI bypass using Python script)
+    
     log "Patching Kernelcache..."
     cp Kernelcache.dec Kernelcache.dec.bak
     "$dir/xpwntool" Kernelcache.dec Kernelcache.raw
@@ -423,8 +468,118 @@ device_ramdisk() {
 
     device_enter_mode pwnDFU
 
-    log "Sending iBSS..."; $irecovery -f $ramdisk_path/iBSS; sleep 2
-    log "Sending iBEC..."; $irecovery -f $ramdisk_path/iBEC; sleep 3
+patch_ibss() {
+    local build_id="${device_target_build:-12H321}"
+    
+   
+    case $build_id in
+        [56789]* )
+            case $device_type in
+                iPad2,* | iPad3,[123] | iPod5,1 ) build_id="12H321";;  # A5
+                iPad3,[456] | iPhone5,* ) build_id="12H321";;  # A6
+                * ) build_id="10B329";;  # Fallback
+            esac
+            log "Using iBSS from build $build_id for A5/A6 workaround"
+        ;;
+    esac
+    
+    log "Creating pwnediBSS from build $build_id..."
+    device_fw_key_check $build_id
+    ipsw_get_url $build_id
+    local name iv key hwmodel="$device_model"
+    case $build_id in [789]* | 10* | 11* | 12* | 13* | 14* ) hwmodel+="ap";; esac
+    name="iBSS.$hwmodel.RELEASE.dfu"
+    
+    mkdir -p ../saved/$device_type
+    [[ -s ../saved/$device_type/pwnediBSS_$build_id ]] && {
+        cp ../saved/$device_type/pwnediBSS_$build_id pwnediBSS
+        log "Using cached pwnediBSS."
+        return
+    }
+    
+    [[ -s ../saved/$device_type/iBSS_$build_id.dfu ]] && cp ../saved/$device_type/iBSS_$build_id.dfu iBSS.orig || \
+        "$dir/pzb" -g "Firmware/dfu/$name" -o iBSS.orig "$ipsw_url"
+    [[ ! -s iBSS.orig ]] && error "Failed to get iBSS."
+    cp iBSS.orig ../saved/$device_type/iBSS_$build_id.dfu 2>/dev/null
+    iv=$(echo $device_fw_key | $jq -j '.keys[] | select(.image == "iBSS") | .iv')
+    key=$(echo $device_fw_key | $jq -j '.keys[] | select(.image == "iBSS") | .key')
+    "$dir/xpwntool" iBSS.orig iBSS.dec -iv $iv -k $key -decrypt
+    "$dir/xpwntool" iBSS.dec iBSS.raw
+    "$dir/iBoot32Patcher" iBSS.raw pwnediBSS --rsa
+    
+    if [[ ! -s pwnediBSS ]]; then
+        error "Failed to create pwnediBSS."
+    fi
+    
+    cp pwnediBSS ../saved/$device_type/pwnediBSS_$build_id
+    log "pwnediBSS created."
+}
+
+ipwndfu_send_ibss() {
+    [[ ! -s pwnediBSS ]] && [[ ! -s ../saved/$device_type/pwnediBSS ]] && patch_ibss
+    [[ -s ../saved/$device_type/pwnediBSS ]] && cp ../saved/$device_type/pwnediBSS .
+    [[ ! -s pwnediBSS ]] && error "pwnediBSS not found."
+    
+    log "Sending pwnediBSS using ipwndfu..."
+    local python2="$(command -v python2)"
+    local pyenv2="$HOME/.pyenv/versions/2.7.18/bin/python2"
+    [[ -z $python2 && -e $pyenv2 ]] && python2="$pyenv2"
+    [[ $platform == "macos" ]] && (( $(sw_vers -productVersion | cut -d. -f1) < 12 )) && python2="/usr/bin/python"
+    
+    if [[ -z $python2 ]]; then
+        warn "python2 not found. Install with: pyenv install 2.7.18"
+        error "Cannot send iBSS without python2/ipwndfu."
+    fi
+    
+    
+    mkdir -p ../resources/ipwndfu
+    if [[ ! -s ../resources/ipwndfu/ipwndfu ]]; then
+        log "Downloading ipwndfu..."
+        download_from_url "https://github.com/LukeZGD/ipwndfu/archive/refs/heads/master.zip" ipwndfu.zip
+        unzip -q ipwndfu.zip -d ../resources/
+        rm -rf ../resources/ipwndfu
+        mv ../resources/ipwndfu-* ../resources/ipwndfu
+    fi
+    
+   
+    if [[ $platform == "macos" ]]; then
+        [[ -e /opt/local/lib/libusb-1.0.dylib ]] && ln -sf /opt/local/lib "$HOME/lib"
+        [[ -e /opt/homebrew/lib/libusb-1.0.dylib ]] && ln -sf /opt/homebrew/lib "$HOME/lib"
+        [[ -e /usr/local/lib/libusb-1.0.dylib ]] && ln -sf /usr/local/lib "$HOME/lib"
+    fi
+    
+    cp pwnediBSS ../resources/ipwndfu/
+    pushd ../resources/ipwndfu >/dev/null
+    "$python2" ipwndfu -l pwnediBSS
+    local ret=$?
+    popd >/dev/null
+    [[ $ret != 0 ]] && error "Failed to send pwnediBSS."
+    log "pwnediBSS sent successfully."
+    sleep 2
+}
+
+    
+    if [[ $device_proc == 5 ]]; then
+        
+        ipwndfu_send_ibss
+        
+        log "Waiting for device to reconnect..."
+        sleep 3
+       
+        $irecovery -q >/dev/null 2>&1 || {
+            log "Waiting for DFU mode..."
+            device_find_mode DFU 10
+        }
+        
+        log "Sending iBEC..."
+        $irecovery -f $ramdisk_path/iBEC
+        $irecovery -c go
+        sleep 3
+    else
+        
+        log "Sending iBSS..."; $irecovery -f $ramdisk_path/iBSS; sleep 2
+        log "Sending iBEC..."; $irecovery -f $ramdisk_path/iBEC; sleep 3
+    fi
     device_find_mode Recovery
     log "Sending ramdisk..."; $irecovery -f $ramdisk_path/Ramdisk.dmg; $irecovery -c ramdisk; sleep 2
     log "Sending DeviceTree..."; $irecovery -f $ramdisk_path/DeviceTree.dec; $irecovery -c devicetree
