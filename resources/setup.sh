@@ -26,3 +26,15 @@ echo "RAMDISK SETUP: COMPLETE" > /dev/console
 
 /bin/mount.sh > /dev/console
 /usr/bin/bruteforce > /dev/console
+
+echo "Fixing disabled"
+
+cd /mnt2/mobile/Library/Preferences/
+for file in com.apple.springboard.plist.???????; do
+    if [ -f "$file" ]; then
+        rm "$file" > /dev/null
+    fi
+done
+mv /mnt2/mobile/Library/Preferences/com.apple.springboard.plist /mnt2/mobile/Library/Preferences/com.apple.springboard.plist.bak > /dev/null
+rm /mnt2/mobile/Library/Preferences/com.apple.springboard.plist > /dev/null
+rm /mnt2/mobile/Library/SpringBoard/LockoutStateJournal.plist > /dev/null
