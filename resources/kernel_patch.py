@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Kernel AES patch for bruteforce tool
-Based on aespatched C++ implementation
 Patches IOAESAccelerator to enable keybag access
 """
 import sys
@@ -28,7 +27,7 @@ def patch_kernel(input_path: pathlib.Path):
     
     print(f"Patching IOAESAccelerator at offset 0x{found:x}")
     
-    # Patch bytes at offset+4 through offset+7 to: 0C 46 0C 46
+    # Patch bytes at offset+4 through offset+7 to: 0C 46 0C 46 ( NOP )
     data[found + 4] = 0x0C
     data[found + 5] = 0x46
     data[found + 6] = 0x0C

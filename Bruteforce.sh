@@ -134,8 +134,6 @@ download_appledb() {
 
 # ==================== DEVICE FUNCTIONS ====================
 
-# ==================== DEVICE FUNCTIONS ====================
-
 device_get_name() {
     case $device_type in
         iPhone1,1) device_name="iPhone 2G";; iPhone1,2) device_name="iPhone 3G";;
@@ -194,7 +192,7 @@ device_get_info() {
         iPhone1,1 | iPod1,1 ) device_proc=0;; # S5L8900
         iPhone1,2 | iPod2,1 ) device_proc=1;; # S5L8720
         iPhone2,1 | iPod3,1 ) device_proc=2;; # S5L8920
-        iPhone3,[123] | iPod4,1 ) device_proc=4;; # A4
+        iPhone3,[123] | iPod4,1 | iPad1,1 ) device_proc=4;; # A4
         iPad2,* | iPad3,[123] | iPhone4,1 | iPod5,1 ) device_proc=5;; # A5
         iPad3,[456] | iPhone5,* ) device_proc=6;; # A6
         *) error "Device not supported: $device_type";;
@@ -244,6 +242,7 @@ enter_pwndfu() {
     
     # 1. Handle S5L8900 (2G, 3G, iPod 1, iPod 2) - "WTF" Exploit
     if [[ $device_proc == 0 || $device_proc == 1 ]]; then
+        [[ $device_mode != "DFU" ]] && device_enter_mode DFU
         if [[ $device_pwnd == "Pwnage 2.0" ]]; then
             log "Already in Pwnage 2.0 mode."
             return
@@ -292,14 +291,38 @@ enter_pwndfu() {
 
     # 2. Handle S5L8920 (3GS, iPod 3) - Alloc8
     if [[ $device_proc == 2 ]]; then 
-         # Check if old bootrom (24kpwn supported) or new bootrom (needs alloc8)
-         # For simplicity, we assume new bootrom needs alloc8.
          if [[ -n $device_pwnd ]]; then
               log "Already in pwned DFU."
               return
          fi
          
-         log "S5L8920 device detected. Using alloc8 exploit..."
+         [[ $device_mode != "DFU" ]] && device_enter_mode DFU
+         
+         log "S5L8920 device detected. Using ipwnder + alloc8..."
+         
+         # Step 2a: Enter PwnDFU first using ipwnder/reipwnder
+         local tool="ipwnder"
+         [[ $platform == "macos" ]] && tool="reipwnder"
+         
+         log "Stage 1: Entering pwnDFU using $tool..."
+         case $tool in
+             "reipwnder" )
+                 mkdir -p shellcode
+                 cp ../resources/limera1n-shellcode.bin shellcode/
+                 ../bin/macos/reipwnder -p
+             ;;
+             "ipwnder" ) $ipwnder -p;;
+         esac
+         
+         sleep 1
+         device_pwnd="$($irecovery -q | grep "PWND" | cut -c 7-)"
+         if [[ -z $device_pwnd ]]; then
+              error "Failed to enter pwnDFU (Stage 1). Cannot proceed to alloc8."
+         fi
+         log "Stage 1 success: $device_pwnd"
+         
+         # Step 2b: Run Alloc8
+         log "Stage 2: Running alloc8 exploit (this takes time)..."
          
          # Need ipwndfu
          local python2="$(command -v python2)"
@@ -328,21 +351,16 @@ enter_pwndfu() {
          
          # Run alloc8
          pushd ../resources/ipwndfu >/dev/null
-         log "Running alloc8 exploit (this takes time)..."
          "$python2" ipwndfu -x
          popd >/dev/null
          
          sleep 2
          device_pwnd="$($irecovery -q | grep "PWND" | cut -c 7-)"
-         if [[ -n $device_pwnd ]]; then
-             log "Alloc8 success: $device_pwnd"
-         else
-             warn "Alloc8 might have failed. Try rebooting and running again."
-         fi
+         log "Alloc8 finished. Device status: $device_pwnd"
          return
     fi
     
-    # 3. Handle A5 (iPhone 4S, iPad 2, etc)
+    # PWNDFU for A5
     if [[ $device_proc == 5 ]]; then
         if [[ -n $device_pwnd ]]; then
             log "Already in pwned DFU: $device_pwnd"
@@ -362,7 +380,7 @@ enter_pwndfu() {
         return
     fi
     
-    # 4. Handle A4 (iPhone 4, iPod 4) & A6 (iPhone 5)
+    # PWNDFU for A4/A6
     [[ -n $device_pwnd ]] && { log "Already in pwned DFU: $device_pwnd"; return; }
     
     [[ $device_mode != "DFU" ]] && device_enter_mode DFU
@@ -418,7 +436,7 @@ device_enter_mode() {
     esac
 }
 
-# ==================== FIRMWARE KEY FUNCTIONS ====================
+# ==================== FIRMWARE KEY ====================
 
 device_fw_key_check() {
     local build="${1:-$device_target_build}"
@@ -469,15 +487,20 @@ select_ramdisk_version() {
             device_target_build="8C148"
             return
         ;;
-        iPhone2,1 | iPod3,1 )
-            print "* Using iOS 6.1.6 (10B500) for 3GS / iPod 3"
+        iPhone2,1 )
+            print "* Using iOS 6.1.6 (10B500) for 3GS"
             device_target_build="10B500"
+            return
+        ;;
+        iPod3,1 )
+            print "* Using iOS 5.1.1 (9B206) for iPod 3"
+            device_target_build="9B206"
             return
         ;;
     esac
 
     if [[ $device_type == "iPad1,1" ]]; then
-        # iPad 1: use iOS 5.1.1
+        # iPad 1: use iOS 5.1.1 (default)
         print "* Using iOS 5.1.1 (9B206) for iPad 1"
         device_target_build="9B206"
     elif [[ $device_proc == 4 ]]; then
@@ -496,7 +519,7 @@ select_ramdisk_version() {
     log "Using build: $device_target_build"
 }
 
-# ==================== SSH RAMDISK CREATION ====================
+# ==================== MAKE RAMDISK ====================
 
 create_sshrd() {
     local comps=("iBSS" "iBEC" "DeviceTree" "Kernelcache" "RestoreRamdisk")
@@ -510,7 +533,7 @@ create_sshrd() {
     ramdisk_path="../saved/$device_type/ramdisk_$build_id"
     mkdir -p $ramdisk_path
     
-    # Download and Decrypt Components
+    # Download and Decrypt 
     for getcomp in "${comps[@]}"; do
         name=$(echo $device_fw_key | $jq -j '.keys[] | select(.image == "'$getcomp'") | .filename')
         iv=$(echo $device_fw_key | $jq -j '.keys[] | select(.image == "'$getcomp'") | .iv')
@@ -543,7 +566,19 @@ create_sshrd() {
     "$dir/xpwntool" RestoreRamdisk.dec Ramdisk.raw
     "$dir/hfsplus" Ramdisk.raw grow 30000000
     "$dir/hfsplus" Ramdisk.raw untar ../resources/sshrd/sbplist.tar 2>/dev/null
-    "$dir/hfsplus" Ramdisk.raw untar ../resources/sshrd/ssh.tar
+    
+    if [[ $device_proc == 0 || $device_proc == 1 || $device_type == "iPad1,1" ]]; then
+        log "Legacy device detected (ARMv6 or iOS 5). Using Legacy SSH..."
+        if [[ -s ../resources/sshrd/ssh_old.tar ]]; then
+            "$dir/hfsplus" Ramdisk.raw untar ../resources/sshrd/ssh_old.tar
+        else
+            warn "ssh_old.tar not found! Trying standard ssh.tar (might fail)..."
+            "$dir/hfsplus" Ramdisk.raw untar ../resources/sshrd/ssh.tar
+        fi
+    else
+        "$dir/hfsplus" Ramdisk.raw untar ../resources/sshrd/ssh.tar
+    fi
+    
     "$dir/hfsplus" Ramdisk.raw mv sbin/reboot sbin/reboot_bak 2>/dev/null
     
     log "Adding bruteforce tools to ramdisk..."
@@ -563,10 +598,22 @@ create_sshrd() {
     fi
     if [[ -s ../resources/setup.sh ]]; then
         "$dir/hfsplus" Ramdisk.raw rm usr/local/bin/restored_external 2>/dev/null
-        "$dir/hfsplus" Ramdisk.raw add ../resources/setup.sh usr/local/bin/restored_external
+        
+        # Prepare setup.sh
+        cp ../resources/setup.sh setup.temp
+        
+        # Add -u flag for legacy devices (iOS 5 and lower)
+        # iPad1,1 = iOS 5.1.1, iPod3,1 = iOS 5.1.1, Proc 0/1 = ARMv6 (iOS 3/4)
+        if [[ $device_type == "iPad1,1" || $device_type == "iPod3,1" || $device_proc == 0 || $device_proc == 1 ]]; then
+            log "Legacy iOS verified. Adding '-u' flag to bruteforce..."
+            sed -i '' 's|/usr/bin/bruteforce|/usr/bin/bruteforce -u|g' setup.temp
+        fi
+        
+        "$dir/hfsplus" Ramdisk.raw add setup.temp usr/local/bin/restored_external
         "$dir/hfsplus" Ramdisk.raw chmod 755 usr/local/bin/restored_external
+        rm -f setup.temp
     fi
-    log "Configured auto-run bruteforce on boot."
+    log "bruteforce auto enable"
     
     "$dir/xpwntool" Ramdisk.raw Ramdisk.dmg -t RestoreRamdisk.dec
     
@@ -585,14 +632,14 @@ create_sshrd() {
     # Patch Kernel
     log "Patching Kernelcache..."
     if [[ $device_type == "iPad1,1" ]]; then
-        log "iPad 1 detected - skipping kernel patch."
+        log "iPad 1 skipping kernel patch."
         cp Kernelcache.dec Kernelcache.patched
     elif [[ $device_proc == 0 ]]; then
         # S5L8900 Kernel Patching
-        log "S5L8900 detected - using specific kernel patch."
+        log "S5L8900 kernel patch from legacy ios kit."
         $bspatch Kernelcache.dec Kernelcache.patched ../resources/patch/kernelcache.release.s5l8900x.patch
     else 
-        # Standard Patch
+        # kernel Patch
         cp Kernelcache.dec Kernelcache.dec.bak
         "$dir/xpwntool" Kernelcache.dec Kernelcache.raw
         if [[ -s ../resources/kernel_patch.py ]]; then
@@ -601,7 +648,7 @@ create_sshrd() {
                 "$dir/xpwntool" Kernelcache.patched Kernelcache.dec -t Kernelcache.dec.bak
                 log "Kernel patched successfully."
             else
-                warn "Kernel patch script failed."
+                warn "Kernel patch failed."
                 mv Kernelcache.dec.bak Kernelcache.dec
             fi
         else
@@ -748,7 +795,7 @@ main() {
     clear
     echo "======================================"
     echo "::"
-    echo "::    Bruteforce Passcode For A4 IOS Device"
+    echo "::    Bruteforce Passcode 32bit IOS Device"
     echo "::"
     echo "::    BUILD_TAG: 1.0"
     echo "::"
